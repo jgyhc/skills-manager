@@ -1,15 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2 } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { cn } from "../utils";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { computePresetStatus } from "../lib/presetStatus";
 import { getScenarioIconOption } from "../lib/scenarioIcons";
 import type { ManagedSkill, Scenario } from "../lib/tauri";
-
-const DEACTIVATE_CONFIRM_THRESHOLD = 20;
 
 export interface PresetBarProps {
   presets: Scenario[];
@@ -33,10 +30,6 @@ export function PresetBar({
   const { t } = useTranslation();
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
-  const [confirmDeactivate, setConfirmDeactivate] = useState<{
-    preset: Scenario;
-    count: number;
-  } | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null);
   const pillRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -112,7 +105,6 @@ export function PresetBar({
   const handleDeactivateConfirmed = useCallback(async (preset: Scenario) => {
     const key = `${preset.id}-remove`;
     setLoadingKey(key);
-    setConfirmDeactivate(null);
     const presetSkills = managedSkills.filter((s) => s.scenario_ids.includes(preset.id));
     let removed = 0, failed = 0;
     for (const skill of presetSkills) {
@@ -134,19 +126,8 @@ export function PresetBar({
   }, [agentKeys, existsInWorkspace, managedSkills, onComplete, onRemoveSkill, t]);
 
   const handleDeactivate = useCallback((preset: Scenario) => {
-    const presetSkills = managedSkills.filter((s) => s.scenario_ids.includes(preset.id));
-    let count = 0;
-    for (const skill of presetSkills) {
-      for (const agentKey of agentKeys) {
-        if (existsInWorkspace(skill, agentKey)) count++;
-      }
-    }
-    if (count >= DEACTIVATE_CONFIRM_THRESHOLD) {
-      setConfirmDeactivate({ preset, count });
-    } else {
-      handleDeactivateConfirmed(preset);
-    }
-  }, [agentKeys, existsInWorkspace, handleDeactivateConfirmed, managedSkills]);
+    handleDeactivateConfirmed(preset);
+  }, [handleDeactivateConfirmed]);
 
   const handlePillClick = useCallback((preset: Scenario, e: React.MouseEvent<HTMLButtonElement>) => {
     const s = statuses.get(preset.id);
@@ -165,8 +146,9 @@ export function PresetBar({
 
   return (
     <>
-      <div className="mb-3 -mt-2">
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide pb-0.5">
+      <div className="mb-3 -mt-2 flex items-center gap-2">
+        <span className="shrink-0 text-[12px] text-muted">Preset</span>
+        <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto scrollbar-hide pb-0.5">
           {visiblePresets.map((preset) => {
             const s = statuses.get(preset.id)!;
             const scenarioIcon = getScenarioIconOption(preset);
@@ -185,20 +167,23 @@ export function PresetBar({
                 disabled={busy}
                 title={t("presetBar.shiftClickHint", { name: preset.name })}
                 className={cn(
-                  "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-50",
+                  "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors disabled:opacity-50",
                   s.status === "active"
-                    ? `${scenarioIcon.activeClass} ${scenarioIcon.colorClass} border-transparent`
+                    ? `${scenarioIcon.activeClass} ${scenarioIcon.colorClass}`
+                    : s.status === "partial"
+                    ? "border-amber-400/50 bg-amber-500/8 text-amber-600 dark:text-amber-400 hover:bg-amber-500/12"
                     : isOpen
                     ? "border-border bg-surface-hover text-secondary"
-                    : "border-border-subtle text-muted hover:border-border hover:text-secondary"
+                    : "border-border-subtle text-faint hover:border-border hover:text-muted"
                 )}
               >
                 {isLoading
                   ? <Loader2 className="h-3 w-3 animate-spin" />
                   : <Icon className="h-3 w-3" />}
-                <span className="max-w-[160px] truncate">{preset.name}</span>
+                <span className="max-w-[140px] truncate">{preset.name}</span>
+                {s.status === "active" && <Check className="h-3 w-3 shrink-0" />}
                 {s.status === "partial" && (
-                  <span className="rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] text-amber-500">
+                  <span className="rounded-full bg-amber-500/20 px-1.5 py-px text-[10px] font-semibold">
                     {s.installed}/{s.total}
                   </span>
                 )}
@@ -279,19 +264,6 @@ export function PresetBar({
         document.body
       )}
 
-      {confirmDeactivate && (
-        <ConfirmDialog
-          open
-          title={t("presetActions.deactivate")}
-          message={t("presetBar.deactivateConfirm", {
-            name: confirmDeactivate.preset.name,
-            count: confirmDeactivate.count,
-          })}
-          tone="danger"
-          onClose={() => setConfirmDeactivate(null)}
-          onConfirm={() => handleDeactivateConfirmed(confirmDeactivate.preset)}
-        />
-      )}
     </>
   );
 }
