@@ -152,6 +152,7 @@ export function MySkills() {
   const [batchUpdating, setBatchUpdating] = useState(false);
   const [toolToggles, setToolToggles] = useState<SkillToolToggle[] | null>(null);
   const [togglingToolKey, setTogglingToolKey] = useState<string | null>(null);
+  const [togglingTarget, setTogglingTarget] = useState<{ skillId: string; tool: string } | null>(null);
   const [gitStatus, setGitStatus] = useState<GitBackupStatus | null>(null);
   const [gitLoading, setGitLoading] = useState<string | null>(null); // "start" | "sync"
   const [gitRemoteConfig, setGitRemoteConfig] = useState("");
@@ -502,6 +503,30 @@ export function MySkills() {
       setTogglingToolKey(null);
     }
   };
+
+  const handleToggleSkillTarget = useCallback(
+    async (skill: ManagedSkill, toolKey: string, enabled: boolean) => {
+      if (togglingTarget) return;
+      setTogglingTarget({ skillId: skill.id, tool: toolKey });
+      const displayName = getToolDisplayName(toolKey, tools);
+      try {
+        if (enabled) {
+          await api.syncSkillToTool(skill.id, toolKey);
+          toast.success(t("mySkills.targetInstalled", { name: skill.name, agent: displayName }));
+        } else {
+          await api.unsyncSkillFromTool(skill.id, toolKey);
+          toast.success(t("mySkills.targetUninstalled", { name: skill.name, agent: displayName }));
+        }
+        await refreshManagedSkills();
+      } catch (error: unknown) {
+        toast.error(getErrorMessage(error, t("common.error")));
+        await refreshManagedSkills();
+      } finally {
+        setTogglingTarget(null);
+      }
+    },
+    [togglingTarget, tools, t, refreshManagedSkills]
+  );
 
   const scheduleRefreshAfterDelete = useCallback(() => {
     if (refreshAfterDeleteRef.current !== null) {
@@ -1632,7 +1657,17 @@ export function MySkills() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <SyncDots skill={skill} tools={tools} limit={6} />
+                      <SyncDots
+                        skill={skill}
+                        tools={tools}
+                        limit={6}
+                        onToggle={
+                          isMultiSelect
+                            ? undefined
+                            : (tool, enabled) => handleToggleSkillTarget(skill, tool, enabled)
+                        }
+                        pendingKey={togglingTarget?.skillId === skill.id ? togglingTarget.tool : null}
+                      />
                       <button
                         onClick={(e) => { e.stopPropagation(); handleToggleScenario(skill); }}
                         disabled={!viewedScenario}
@@ -1718,7 +1753,18 @@ export function MySkills() {
                       {badge.label}
                     </span>
                   )}
-                  <SyncDots skill={skill} tools={tools} limit={6} size="sm" />
+                  <SyncDots
+                    skill={skill}
+                    tools={tools}
+                    limit={6}
+                    size="sm"
+                    onToggle={
+                      isMultiSelect
+                        ? undefined
+                        : (tool, enabled) => handleToggleSkillTarget(skill, tool, enabled)
+                    }
+                    pendingKey={togglingTarget?.skillId === skill.id ? togglingTarget.tool : null}
+                  />
                   <span className="inline-flex items-center gap-1 text-[13px] text-muted">
                     {sourceIcon(skill.source_type)}
                     {sourceTypeLabel(skill)}

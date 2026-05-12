@@ -1,3 +1,5 @@
+import { Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import type { ProjectAgentTarget } from "../lib/tauri";
 import { cn } from "../utils";
 import { AgentIcon, hasAgentIcon } from "./AgentIcon";
@@ -20,9 +22,26 @@ interface Props {
   limit?: number;
   size?: "sm" | "md";
   className?: string;
+  /**
+   * When provided, each agent dot becomes a button: clicking adds/removes the
+   * skill for that agent in the project. The handler receives the next state.
+   */
+  onToggle?: (agentKey: string, enabled: boolean) => void;
+  /** Agent key currently performing an assign/remove operation; shows a loader on that dot. */
+  pendingKey?: string | null;
 }
 
-export function ProjectAgentDots({ assignedAgents, agentDisplayNames = {}, targets, limit, size = "md", className }: Props) {
+export function ProjectAgentDots({
+  assignedAgents,
+  agentDisplayNames = {},
+  targets,
+  limit,
+  size = "md",
+  className,
+  onToggle,
+  pendingKey,
+}: Props) {
+  const { t } = useTranslation();
   const assignedSet = new Set(assignedAgents);
   const availableKeys = new Set(targets.filter((t) => t.installed && t.enabled).map((t) => t.key));
 
@@ -72,28 +91,60 @@ export function ProjectAgentDots({ assignedAgents, agentDisplayNames = {}, targe
     orphan: " · assigned · agent unavailable",
   };
 
+  const clickHint: Record<DotState, string> = {
+    synced: ` · ${t("project.agentClickRemove")}`,
+    available: ` · ${t("project.agentClickAdd")}`,
+    orphan: ` · ${t("project.agentClickRemove")}`,
+  };
+
   return (
     <div className={cn("flex items-center gap-[2px]", className)}>
       {visible.map((dot) => {
         const useIcon = hasAgentIcon(dot.key);
+        const isPending = pendingKey === dot.key;
+        const interactive = !!onToggle && !isPending;
+        const title = `${dot.displayName}${stateTitle[dot.state]}${onToggle ? clickHint[dot.state] : ""}`;
+        const baseClass = cn(
+          "inline-flex select-none items-center justify-center overflow-hidden rounded-[4px] transition-colors",
+          dim,
+          useIcon ? iconStateClass[dot.state] : cn("border font-mono font-semibold tracking-tight", textStateClass[dot.state]),
+          interactive && "cursor-pointer hover:ring-1 hover:ring-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+          isPending && "opacity-70",
+        );
+        const content = isPending ? (
+          <Loader2 className="h-3 w-3 animate-spin text-muted" />
+        ) : useIcon ? (
+          <AgentIcon
+            agentKey={dot.key}
+            className="h-full w-full rounded-[4px] border-0 bg-transparent"
+          />
+        ) : (
+          shortLabel(dot.displayName, dot.key)
+        );
+
+        if (onToggle) {
+          return (
+            <button
+              type="button"
+              key={dot.key}
+              title={title}
+              aria-label={title}
+              disabled={isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onToggle(dot.key, dot.state === "available");
+              }}
+              className={baseClass}
+            >
+              {content}
+            </button>
+          );
+        }
+
         return (
-          <span
-            key={dot.key}
-            title={`${dot.displayName}${stateTitle[dot.state]}`}
-            className={cn(
-              "inline-flex select-none items-center justify-center overflow-hidden rounded-[4px] transition-colors",
-              dim,
-              useIcon ? iconStateClass[dot.state] : cn("border font-mono font-semibold tracking-tight", textStateClass[dot.state]),
-            )}
-          >
-            {useIcon ? (
-              <AgentIcon
-                agentKey={dot.key}
-                className="h-full w-full rounded-[4px] border-0 bg-transparent"
-              />
-            ) : (
-              shortLabel(dot.displayName, dot.key)
-            )}
+          <span key={dot.key} title={title} className={baseClass}>
+            {content}
           </span>
         );
       })}

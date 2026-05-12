@@ -166,7 +166,7 @@ export function ProjectDetail() {
   const [batchUpdatingCenter, setBatchUpdatingCenter] = useState(false);
   const [batchUpdatingProject, setBatchUpdatingProject] = useState(false);
   const [togglingSkill, setTogglingSkill] = useState<string | null>(null);
-  const [togglingDetailAgent, setTogglingDetailAgent] = useState<string | null>(null);
+  const [togglingAgentTarget, setTogglingAgentTarget] = useState<{ skillKey: string; agent: string } | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ProjectSkillGroup | null>(null);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState(false);
@@ -506,11 +506,12 @@ export function ProjectDetail() {
 
   const handleToggleDetailAgent = async (skill: ProjectSkillGroup, agentKey: string, enabled: boolean) => {
     if (!id) return;
+    if (togglingAgentTarget) return;
     const target = exportTargets.find((item) => item.key === agentKey);
     const displayName = target?.display_name ?? agentKey;
     const existingVariant = skill.variants.find((variant) => variant.agent === agentKey);
 
-    setTogglingDetailAgent(agentKey);
+    setTogglingAgentTarget({ skillKey: getSkillKey(skill), agent: agentKey });
     try {
       if (enabled) {
         const centerSkillId = skill.centerSkillIds[0];
@@ -529,7 +530,7 @@ export function ProjectDetail() {
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, t("common.error")));
     } finally {
-      setTogglingDetailAgent(null);
+      setTogglingAgentTarget(null);
     }
   };
 
@@ -1116,6 +1117,12 @@ export function ProjectDetail() {
                           targets={exportTargets}
                           limit={4}
                           size="sm"
+                          onToggle={(agentKey, enabled) => handleToggleDetailAgent(skill, agentKey, enabled)}
+                          pendingKey={
+                            togglingAgentTarget?.skillKey === skillKey
+                              ? togglingAgentTarget.agent
+                              : null
+                          }
                         />
                         {canUpdateCenter && (
                           <button
@@ -1251,6 +1258,16 @@ export function ProjectDetail() {
                     targets={exportTargets}
                     limit={4}
                     size="sm"
+                    onToggle={
+                      isMultiSelect
+                        ? undefined
+                        : (agentKey, enabled) => handleToggleDetailAgent(skill, agentKey, enabled)
+                    }
+                    pendingKey={
+                      togglingAgentTarget?.skillKey === skillKey
+                        ? togglingAgentTarget.agent
+                        : null
+                    }
                   />
                 </div>
 
@@ -1330,7 +1347,11 @@ export function ProjectDetail() {
         <ProjectSkillDetailPanel
           skill={detailSkill}
           targets={exportTargets}
-          togglingAgent={togglingDetailAgent}
+          togglingAgent={
+            togglingAgentTarget?.skillKey === getSkillKey(detailSkill)
+              ? togglingAgentTarget.agent
+              : null
+          }
           onToggleAgent={(agentKey, enabled) => handleToggleDetailAgent(detailSkill, agentKey, enabled)}
           docContent={docContent}
           docLoading={docLoading}
