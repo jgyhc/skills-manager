@@ -417,6 +417,24 @@ export interface DiagnosticInfo {
 export const getDiagnosticInfo = () =>
   invoke<DiagnosticInfo>("get_diagnostic_info");
 
+export interface LogExcerpt {
+  log_path: string;
+  excerpt: string;
+  line_count: number;
+  has_warnings: boolean;
+}
+
+export const getRecentLogExcerpt = () =>
+  invoke<LogExcerpt>("get_recent_log_excerpt");
+
+export interface LogExportResult {
+  zip_path: string;
+  file_count: number;
+}
+
+export const exportLogsZip = () =>
+  invoke<LogExportResult>("export_logs_zip");
+
 // ── Git Backup ──
 
 export type GitUpstreamHealth =

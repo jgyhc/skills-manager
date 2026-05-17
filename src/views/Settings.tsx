@@ -18,6 +18,7 @@ import {
   BookOpen,
   Bug,
   Download,
+  FileArchive,
   Type,
   Key,
   Pencil,
@@ -171,6 +172,7 @@ export function Settings() {
   const [openingRepo, setOpeningRepo] = useState(false);
   const [openingGithub, setOpeningGithub] = useState(false);
   const [reportingIssue, setReportingIssue] = useState(false);
+  const [exportingLogs, setExportingLogs] = useState(false);
   const [centralRepoPath, setCentralRepoPath] = useState("");
   const [centralRepoPathOverride, setCentralRepoPathOverride] = useState<string | null>(null);
   const [editingCentralRepoPath, setEditingCentralRepoPath] = useState(false);
@@ -477,17 +479,51 @@ export function Settings() {
     }
   };
 
+  const handleExportLogs = async () => {
+    setExportingLogs(true);
+    try {
+      const result = await api.exportLogsZip();
+      toast.success(t("settings.exportLogsDone", { count: result.file_count }), {
+        description: result.zip_path,
+      });
+    } catch (error) {
+      console.error("Failed to export logs", error);
+      toast.error(t("settings.exportLogsFailed"));
+    } finally {
+      setExportingLogs(false);
+    }
+  };
+
   const handleReportIssue = async () => {
     setReportingIssue(true);
     try {
-      const info = await api.getDiagnosticInfo();
-      const md = [
+      const [info, logExcerpt] = await Promise.all([
+        api.getDiagnosticInfo(),
+        api.getRecentLogExcerpt().catch((err) => {
+          console.warn("Failed to read log excerpt", err);
+          return null;
+        }),
+      ]);
+      const parts = [
         "**Diagnostics** (auto-collected by Skills Manager)",
         "",
         `- App version: \`${info.app_version}\``,
         `- OS: \`${info.os} ${info.os_version} (${info.arch})\``,
         `- Central repo: \`${info.central_repo_path}\`${info.central_repo_path_overridden ? " (custom path)" : ""}`,
-      ].join("\n");
+      ];
+      if (logExcerpt) {
+        parts.push(
+          "",
+          `**Recent log** (\`${logExcerpt.log_path}\`, ${logExcerpt.line_count} lines${logExcerpt.has_warnings ? ", includes warnings/errors" : ""})`,
+          "",
+          "```log",
+          logExcerpt.excerpt,
+          "```",
+          "",
+          `> ${t("settings.reportIssueExportHint")}`,
+        );
+      }
+      const md = parts.join("\n");
       let copied = false;
       try {
         await clipboardWriteText(md);
@@ -1547,6 +1583,20 @@ export function Settings() {
                   <Bug className="w-3 h-3" />
                 )}
                 {t("settings.reportIssue")}
+              </button>
+              <button
+                type="button"
+                onClick={handleExportLogs}
+                disabled={exportingLogs}
+                title={t("settings.exportLogsHint")}
+                className={`${actionButtonClass} bg-surface-hover hover:bg-surface-active text-tertiary border-border`}
+              >
+                {exportingLogs ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <FileArchive className="w-3 h-3" />
+                )}
+                {t("settings.exportLogs")}
               </button>
               <button
                 type="button"
