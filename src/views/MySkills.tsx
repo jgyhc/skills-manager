@@ -960,7 +960,14 @@ export function MySkills() {
         toast.success(t("settings.gitPullSuccess"));
       }
 
-      if (committed || status.ahead > 0) {
+      // `no_upstream` means the local branch has commits but no remote-tracking
+      // branch yet (fresh init against an empty remote). `ahead` reads 0 in that
+      // state because there is no @{upstream} to diff against, so without this
+      // the first push is silently skipped and the remote stays empty while we
+      // report "Up to date". The backend push path sets upstream via `-u`.
+      const needsPush =
+        committed || status.ahead > 0 || status.upstream_health === "no_upstream";
+      if (needsPush) {
         const snapshotTag = await api.gitBackupCreateSnapshot();
         await api.gitBackupPush();
         toast.success(t("mySkills.gitSyncSuccessWithVersion", { tag: displaySnapshotLabel(snapshotTag) }));
