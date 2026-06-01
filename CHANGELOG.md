@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.5] - 2026-06-01
+
+### Release Overview
+- A Git-sync reliability release: the very first backup to a fresh remote now actually uploads instead of silently reporting "Up to date", conflicting edits from two machines recover gracefully instead of wedging the library, and Git operations are now logged so sync problems can be diagnosed. Built-in agents also gain editable project skill paths.
+
+### User-facing
+- **First backup to a new remote now uploads** — Setting up backup against a freshly created empty repository used to commit everything locally but never push, so Sync reported "Up to date" while the remote stayed empty. The first sync now correctly performs the initial push (setting up upstream tracking), so a new remote is populated as expected (#162, #179, #116).
+- **Sync conflicts recover instead of breaking the library** — When two machines edited the same skill and both synced, the merge conflict left the repository in a stuck state that blocked all future syncs (and could even prevent the app from loading). Sync now rolls back the failed merge automatically and offers a one-click "re-clone from remote" recovery, with skills that exist only locally preserved (#169).
+- **Built-in agents get editable project skill paths** — The per-project skills path (and reset-to-default) that was previously only available for custom agents now works for built-in agents too. Each path row exposes edit/reset actions on hover for both the global and project paths.
+
+### Developer & Governance
+- Fixed the sync push gate in `handleGitSync`: a `no_upstream` repo reports `ahead = 0` (there is no `@{upstream}` to diff against), so the old `committed || ahead > 0` condition skipped the first push entirely. It now also pushes when `upstream_health === "no_upstream"`, relying on the backend `push -u` path to establish tracking.
+- Added structured logging across the Git backup subsystem (`init`/`set_remote`/`commit`/`push`/`pull`/`snapshot`/`restore`/`clone`/`reclone`) at INFO, with a single WARN failure chokepoint in `run_git_checked`; remote URLs are redacted. Previously the subsystem emitted no logs, leaving "sync silently did nothing" reports undiagnosable.
+- `pull_unlocked` now runs the merge via `run_git` and, on conflict, logs a warning, runs best-effort `git merge --abort` to clear the conflicted tree and `MERGE_HEAD`, then bails with a recognizable `SYNC_CONFLICT` error; the frontend routes that to the recovery dialog (re-clone only for conflicts). Regression tests cover first-push-to-empty-remote and the two-sided conflict abort.
+- Built-in agent project-path overrides persist in a new `custom_tool_project_paths` setting (an empty value or one equal to the built-in default clears the override); the Settings path UI was unified so global and project rows share the same right-aligned hover actions.
 ## [1.22.4] - 2026-05-30
 
 ### Release Overview
