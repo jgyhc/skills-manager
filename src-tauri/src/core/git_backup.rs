@@ -346,7 +346,17 @@ pub(crate) fn pull_unlocked(skills_dir: &Path) -> Result<()> {
     log::info!("git pull: fetch + merge origin/{branch}");
 
     run_git_checked(skills_dir, &["fetch", "origin", &branch])?;
-    run_git_checked(skills_dir, &["merge", &format!("origin/{branch}")])?;
+    if let Err(e) = run_git(skills_dir, &["merge", &format!("origin/{branch}")]) {
+        // A failed merge — almost always a content conflict on a SKILL.md body
+        // edited on two machines — leaves the working tree conflicted with
+        // MERGE_HEAD behind, which `ensure_no_interrupted_git_operation` would
+        // then treat as a hard block on every future sync. Abort to restore a
+        // clean tree, and surface a recognizable conflict error so the UI can
+        // route the user to recovery (re-clone) instead of leaving them stuck.
+        log::warn!("git pull: merge failed, aborting to clear conflicted state: {e}");
+        let _ = run_git(skills_dir, &["merge", "--abort"]);
+        anyhow::bail!("SYNC_CONFLICT: local and remote skill changes conflict ({e})");
+    }
     log::info!("git pull: done");
     Ok(())
 }
@@ -1132,6 +1142,83 @@ mod tests {
             "remote should have branch main after first push"
         );
         assert_eq!(detect_upstream_health(&work, true), "healthy");
+    }
+
+    #[test]
+    fn pull_conflict_aborts_merge_and_reports_sync_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("remote.git");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+
+        assert!(Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&remote)
+            .output()
+            .unwrap()
+            .status
+            .success());
+
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+
+        // Machine A: seed one skill file and publish it.
+        assert!(git(&a, &["init"]).status.success());
+        assert!(git(&a, &["checkout", "-b", "main"]).status.success());
+        std::fs::write(a.join("skill.md"), "base\n").unwrap();
+        assert!(git(&a, &["add", "-A"]).status.success());
+        assert!(git(&a, &["commit", "-m", "base"]).status.success());
+        assert!(git(&a, &["remote", "add", "origin", remote.to_str().unwrap()]).status.success());
+        assert!(git(&a, &["push", "-u", "origin", "main"]).status.success());
+
+        // Machine B: clone, then both sides edit the SAME line differently.
+        assert!(Command::new("git")
+            .args(["clone", remote.to_str().unwrap()])
+            .arg(&b)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(git(&b, &["config", "user.email", "test@example.com"]).status.success());
+        assert!(git(&b, &["config", "user.name", "Test"]).status.success());
+
+        std::fs::write(a.join("skill.md"), "edited on A\n").unwrap();
+        assert!(git(&a, &["commit", "-am", "edit A"]).status.success());
+        assert!(git(&a, &["push", "origin", "main"]).status.success());
+
+        std::fs::write(b.join("skill.md"), "edited on B\n").unwrap();
+        assert!(git(&b, &["commit", "-am", "edit B"]).status.success());
+
+        // B pulls A's conflicting change. The merge must fail, be aborted, and
+        // surface a recognizable conflict error — not leave B wedged.
+        let err = pull_unlocked(&b).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("SYNC_CONFLICT"),
+            "expected a recognizable conflict error, got: {msg}"
+        );
+
+        // Crucial: the abort must clear the in-progress merge so future syncs
+        // are not permanently blocked.
+        assert!(
+            !b.join(".git/MERGE_HEAD").exists(),
+            "MERGE_HEAD should be gone after abort"
+        );
+        let porcelain = run_git(&b, &["status", "--porcelain"]).unwrap();
+        assert!(
+            porcelain.is_empty(),
+            "working tree should be clean after abort, got: {porcelain:?}"
+        );
+        // And a follow-up sync is no longer blocked by an interrupted operation.
+        ensure_no_interrupted_git_operation(&b).unwrap();
     }
 
     #[test]
