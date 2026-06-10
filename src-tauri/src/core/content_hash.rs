@@ -61,6 +61,13 @@ pub fn list_content_files(dir: &Path) -> Vec<ContentEntry> {
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .into_owned();
+            // Normalize Windows separators to `/` so the hashed byte
+            // stream is identical across platforms — otherwise Windows
+            // feeds `sub\c.md` into the hash and disagrees with every
+            // other OS about the same content. Windows-only because `\`
+            // is a legal filename character on unix.
+            #[cfg(windows)]
+            let relative_path = relative_path.replace('\\', "/");
             let exec_bits = exec_bits_of(entry.path());
             ContentEntry {
                 relative_path,

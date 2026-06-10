@@ -1152,8 +1152,12 @@ mod tests {
         let b = tmp.path().join("b");
         std::fs::create_dir_all(&a).unwrap();
 
+        // Pin the bare repo's HEAD to main: without a global
+        // init.defaultBranch (CI runners have none) it points at master,
+        // the later clone finds a dangling HEAD and checks nothing out,
+        // and machine B's `commit -am` fails on an unborn branch.
         assert!(Command::new("git")
-            .args(["init", "--bare"])
+            .args(["init", "--bare", "--initial-branch=main"])
             .arg(&remote)
             .output()
             .unwrap()
