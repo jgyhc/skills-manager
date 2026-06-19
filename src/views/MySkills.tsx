@@ -21,6 +21,8 @@ import {
   Square,
   GripVertical,
   CircleSlash,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
@@ -29,6 +31,7 @@ import { cn } from "../utils";
 import { useApp } from "../context/AppContext";
 import { useMultiSelect } from "../hooks/useMultiSelect";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { TagRenameDialog } from "../components/TagRenameDialog";
 import { DeleteSkillButton } from "../components/DeleteSkillButton";
 import { SkillDetailPanel } from "../components/SkillDetailPanel";
 import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
@@ -144,6 +147,11 @@ export function MySkills() {
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
   const [tagFilters, setTagFilters] = useState<Set<string>>(new Set());
   const [allTags, setAllTags] = useState<string[]>([]);
+  // Tag management from the filter bar (#233): right-click a tag pill to
+  // rename (dialog) or delete (confirm). Left-click stays "filter only".
+  const [tagMenu, setTagMenu] = useState<{ tag: string; x: number; y: number } | null>(null);
+  const [tagToRename, setTagToRename] = useState<string | null>(null);
+  const [tagToDelete, setTagToDelete] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const refreshAfterDeleteRef = useRef<number | null>(null);
@@ -201,6 +209,16 @@ export function MySkills() {
   useEffect(() => {
     refreshAllTags();
   }, [skills]);
+
+  // Close the tag context menu on Escape (click-outside is handled by its backdrop).
+  useEffect(() => {
+    if (!tagMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTagMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tagMenu]);
 
   const toggleFilter = (set: Set<string>, value: string): Set<string> => {
     const next = new Set(set);
@@ -868,6 +886,48 @@ export function MySkills() {
     }
   };
 
+  // Replace `oldTag` with `newTag` in the active filter set so the current
+  // filtering survives a rename/delete.
+  const replaceTagInFilters = (oldTag: string, newTag?: string) =>
+    setTagFilters((prev) => {
+      if (!prev.has(oldTag)) return prev;
+      const next = new Set(prev);
+      next.delete(oldTag);
+      if (newTag) next.add(newTag);
+      return next;
+    });
+
+  // Throws on failure so the rename dialog stays open (it only closes after a
+  // resolved onRename), matching how RenamePresetDialog behaves.
+  const handleRenameTag = async (newName: string) => {
+    const oldName = tagToRename;
+    if (oldName === null) return;
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    try {
+      await api.renameTag(oldName, trimmed);
+      replaceTagInFilters(oldName, trimmed);
+      toast.success(t("mySkills.tags.tagRenamed"));
+      await refreshManagedSkills();
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, t("common.error")));
+      throw error;
+    }
+  };
+
+  const handleDeleteTag = async () => {
+    const tag = tagToDelete;
+    if (tag === null) return;
+    try {
+      await api.deleteTag(tag);
+      replaceTagInFilters(tag);
+      toast.success(t("mySkills.tags.tagDeleted"));
+      await refreshManagedSkills();
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, t("common.error")));
+    }
+  };
+
   const getTagOptions = (skill: ManagedSkill, keyword: string) => {
     const needle = keyword.trim().toLowerCase();
     return allTags.filter((tag) => {
@@ -1410,6 +1470,15 @@ export function MySkills() {
                 <button
                   key={tag}
                   onClick={() => setTagFilters(toggleFilter(tagFilters, tag))}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setTagMenu({
+                      tag,
+                      x: Math.min(e.clientX, window.innerWidth - 160),
+                      y: Math.min(e.clientY, window.innerHeight - 90),
+                    });
+                  }}
+                  title={t("mySkills.tags.manageHint")}
                   className={cn(
                     "rounded-full px-2.5 py-0.5 text-[12px] font-medium transition-colors",
                     isActive ? getTagActiveColor(tag, allTags) : getTagColor(tag, allTags)
@@ -1919,6 +1988,58 @@ export function MySkills() {
         onClose={() => setBatchDeleteConfirm(false)}
         onConfirm={handleBatchDelete}
       />
+      <ConfirmDialog
+        open={tagToDelete !== null}
+        title={t("mySkills.tags.deleteTag")}
+        message={t("mySkills.tags.deleteConfirm", { tag: tagToDelete || "" })}
+        onClose={() => setTagToDelete(null)}
+        onConfirm={handleDeleteTag}
+      />
+      <TagRenameDialog
+        open={tagToRename !== null}
+        currentName={tagToRename || ""}
+        onClose={() => setTagToRename(null)}
+        onRename={handleRenameTag}
+      />
+      {tagMenu && (
+        <>
+          {/* Backdrop closes on left- or right-click outside the menu. Explicit
+              z-index (z-40/z-50) to avoid the macOS WKWebView stacking bug. */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setTagMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setTagMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-50 min-w-[140px] overflow-hidden rounded-lg border border-border bg-surface py-1 shadow-2xl"
+            style={{ top: tagMenu.y, left: tagMenu.x }}
+          >
+            <button
+              onClick={() => {
+                setTagToRename(tagMenu.tag);
+                setTagMenu(null);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-secondary hover:bg-surface-hover"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              {t("mySkills.tags.renameTag")}
+            </button>
+            <button
+              onClick={() => {
+                setTagToDelete(tagMenu.tag);
+                setTagMenu(null);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-red-400 hover:bg-surface-hover"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {t("mySkills.tags.deleteTag")}
+            </button>
+          </div>
+        </>
+      )}
       <BatchTagDialog
         open={batchTagDialogOpen}
         skills={skills.filter((s) => selectedIds.has(s.id))}
