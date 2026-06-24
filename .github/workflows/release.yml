@@ -155,6 +155,7 @@ jobs:
 
       - name: Resolve Tauri build args
         id: tauri_args
+        shell: bash
         run: |
           ARGS="--target ${{ matrix.target }}"
           if [ "${{ needs.prepare.outputs.updater_signing }}" != "true" ]; then
