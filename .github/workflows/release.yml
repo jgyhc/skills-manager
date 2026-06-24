@@ -10,7 +10,24 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      updater_signing: ${{ steps.check.outputs.sign }}
+    steps:
+      - name: Detect updater signing secret
+        id: check
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +153,17 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve Tauri build args
+        id: tauri_args
+        run: |
+          ARGS="--target ${{ matrix.target }}"
+          if [ "${{ needs.prepare.outputs.updater_signing }}" != "true" ]; then
+            # Forks / CI without TAURI_SIGNING_PRIVATE_KEY still ship installable
+            # bundles (.dmg, .msi, …) but skip signed updater artifacts.
+            ARGS="$ARGS -c '{\"bundle\":{\"createUpdaterArtifacts\":false}}'"
+          fi
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -154,7 +182,8 @@ jobs:
           releaseDraft: false
           prerelease: false
           updaterJsonKeepUniversal: true
-          args: --target ${{ matrix.target }}
+          includeUpdaterJson: ${{ needs.prepare.outputs.updater_signing == 'true' }}
+          args: ${{ steps.tauri_args.outputs.args }}
 
       - name: Verify macOS bundle signature
         if: startsWith(matrix.platform, 'macos')
@@ -169,8 +198,8 @@ jobs:
           codesign -dvvv "$APP_PATH" 2>&1 | grep -E 'Signature|Sealed Resources|Identifier'
 
   verify-updater-assets:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, prepare]
+    if: startsWith(github.ref, 'refs/tags/') && needs.prepare.outputs.updater_signing == 'true'
     runs-on: ubuntu-latest
     name: Verify updater assets
     steps:
