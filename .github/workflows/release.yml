@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       updater_signing: ${{ steps.check.outputs.sign }}
+      has_password: ${{ steps.check.outputs.has_password }}
     steps:
       - name: Detect updater signing secret
         id: check
@@ -171,8 +172,7 @@ jobs:
           fi
           echo "args=$ARGS" >> "$GITHUB_OUTPUT"
 
-      # Only export TAURI_SIGNING_PRIVATE_KEY_PASSWORD when non-empty. An empty
-      # secret makes Tauri attempt decryption and fails on passwordless keys.
+      # Trim trailing newlines from Secrets (common when pasting via `gh secret set`).
       - name: Configure updater signing env
         if: needs.prepare.outputs.updater_signing == 'true'
         shell: bash
@@ -182,13 +182,13 @@ jobs:
         run: |
           {
             echo "TAURI_SIGNING_PRIVATE_KEY<<EOF"
-            echo "$SIGNING_KEY"
+            printf '%s' "$SIGNING_KEY"
             echo "EOF"
           } >> "$GITHUB_ENV"
           if [ "${{ needs.prepare.outputs.has_password }}" = "true" ]; then
             {
               echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<EOF"
-              echo "$SIGNING_PASSWORD"
+              printf '%s' "$SIGNING_PASSWORD"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
@@ -197,6 +197,8 @@ jobs:
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.prepare.outputs.updater_signing == 'true' && env.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.prepare.outputs.updater_signing == 'true' && needs.prepare.outputs.has_password == 'true' && env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           # Ad-hoc sign macOS bundles so Gatekeeper reports "unverified developer"
           # (dismissable via right-click → Open) instead of "app is damaged".
           # Without this, the linker-only signature has no sealed resources and
