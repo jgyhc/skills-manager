@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.25.1] - 2026-06-24
+
+### 发布概览
+- 提升 Git 安装与更新检查的可靠性：克隆仓库时可选择分支，并避免更新检查在网络缓慢或 SSH 等待口令时卡死界面。
+
+### 用户可见更新
+- **Git 安装支持选择分支** —— 输入仓库地址后，安装页会自动拉取远端分支列表供选择。GitHub tree 链接（如 `…/tree/main/…`）会在分支存在时自动预选对应分支，否则选中仓库默认分支。
+- **更新检查不再冻住应用** —— 远端 Git 查询（`ls-remote`、分支列表）现设有 30 秒超时，失败时会给出明确提示，而不会无限转圈。SSH 使用非交互模式，缺少密钥或等待口令输入时不会阻塞界面。
+- **Git skill 更新检测更准确** —— 早期安装时未持久化分支信息的 skill，检查更新时会从原始 source URL 回填分支与子路径。新安装也会在 UI 未显式记录分支时，持久化实际检出的分支。
+
+### 开发者与治理更新
+- 新增 `list_git_branches` Tauri 命令与 `RemoteBranchInfo` 返回类型；`preview_git_install` / `confirm_git_install` 增加可选 `branch` 参数。
+- `resolve_remote_revision` 移除可能无限阻塞的 libgit2 匿名远端回退，改为仅使用系统 `git ls-remote`；新增 `git_output_with_timeout`、`list_remote_branch_info`、`detect_clone_branch`、`resolve_git_source_for_skill`。
+- 为英文、简体中文、繁体中文新增 `install.gitBranch*` i18n key。
+
 ## [1.25.0] - 2026-06-19
 
 ### 发布概览

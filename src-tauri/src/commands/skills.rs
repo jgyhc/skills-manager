@@ -154,6 +154,19 @@ pub struct GitPreviewResult {
     pub skills: Vec<GitSkillPreview>,
 }
 
+/// Resolve clone URL + branch for git install, with an optional UI branch override.
+fn resolve_git_install_source(
+    repo_url: &str,
+    branch: Option<String>,
+    proxy_url: Option<&str>,
+) -> git_fetcher::ParsedGitSource {
+    let mut parsed = git_fetcher::parse_git_source_resolved(repo_url, proxy_url);
+    if let Some(branch) = branch.filter(|b| !b.trim().is_empty()) {
+        parsed.branch = Some(branch.trim().to_string());
+    }
+    parsed
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct SkillInstallItem {
     pub rel_path: String,
@@ -285,7 +298,7 @@ pub async fn get_source_skill_document(
             ));
         }
 
-        let git_source = git_source_from_skill(&skill)?;
+        let git_source = resolve_git_source_for_skill(&skill, proxy_url.as_deref())?;
         git_fetcher::validate_git_url(&git_source.clone_url).map_err(AppError::git)?;
         let remote_revision = git_fetcher::resolve_remote_revision(
             &git_source.clone_url,
@@ -479,7 +492,7 @@ pub async fn get_skill_source_diff(
             ));
         }
 
-        let git_source = git_source_from_skill(&skill)?;
+        let git_source = resolve_git_source_for_skill(&skill, proxy_url.as_deref())?;
         git_fetcher::validate_git_url(&git_source.clone_url).map_err(AppError::git)?;
         let remote_revision = git_fetcher::resolve_remote_revision(
             &git_source.clone_url,
@@ -940,6 +953,7 @@ pub async fn install_from_skillssh(
 #[tauri::command]
 pub async fn preview_git_install(
     repo_url: String,
+    branch: Option<String>,
     store: State<'_, Arc<SkillStore>>,
     cancel_registry: State<'_, Arc<InstallCancelRegistry>>,
     app_handle: tauri::AppHandle,
@@ -963,7 +977,7 @@ pub async fn preview_git_install(
             )
             .ok();
 
-        let parsed = git_fetcher::parse_git_source_resolved(&repo_url, proxy_url.as_deref());
+        let parsed = resolve_git_install_source(&repo_url, branch, proxy_url.as_deref());
         let app_for_progress = app_handle.clone();
         let url_for_progress = repo_url.clone();
         let progress_cb: git_fetcher::ProgressCallback = Box::new(move |msg: &str| {
@@ -1029,6 +1043,7 @@ pub async fn preview_git_install(
 #[tauri::command]
 pub async fn confirm_git_install(
     repo_url: String,
+    branch: Option<String>,
     temp_dir: String,
     items: Vec<SkillInstallItem>,
     store: State<'_, Arc<SkillStore>>,
@@ -1043,7 +1058,11 @@ pub async fn confirm_git_install(
                 return Ok(());
             }
 
-            let parsed = git_fetcher::parse_git_source_resolved(&repo_url, proxy_url.as_deref());
+            let parsed = resolve_git_install_source(&repo_url, branch, proxy_url.as_deref());
+            let mut effective_branch = parsed.branch.clone();
+            if effective_branch.is_none() {
+                effective_branch = git_fetcher::detect_clone_branch(&temp_path);
+            }
             let skill_dir = resolve_skill_dir(&temp_path, parsed.subpath.as_deref(), None)?;
             let all_dirs = collect_git_skill_dirs(&skill_dir);
             let revision = git_fetcher::get_head_revision(&temp_path).map_err(AppError::git)?;
@@ -1070,7 +1089,7 @@ pub async fn confirm_git_install(
                     source_ref: Some(repo_url.clone()),
                     source_ref_resolved: Some(parsed.clone_url.clone()),
                     source_subpath: subpath,
-                    source_branch: parsed.branch.clone(),
+                    source_branch: effective_branch.clone(),
                     source_revision: Some(revision.clone()),
                     remote_revision: Some(revision.clone()),
                     update_status: "up_to_date".to_string(),
@@ -1095,6 +1114,23 @@ pub async fn cancel_git_preview(temp_dir: String) -> Result<(), AppError> {
             git_fetcher::cleanup_temp(&temp_path);
         }
         Ok(())
+    })
+    .await?
+}
+
+/// List remote branches for a git repository URL (used by the install UI).
+#[tauri::command]
+pub async fn list_git_branches(
+    repo_url: String,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<git_fetcher::RemoteBranchInfo, AppError> {
+    let store = store.inner().clone();
+    let proxy_url = store.proxy_url();
+    tauri::async_runtime::spawn_blocking(move || {
+        git_fetcher::validate_git_url(&repo_url).map_err(AppError::git)?;
+        let parsed = git_fetcher::parse_git_source_resolved(&repo_url, proxy_url.as_deref());
+        git_fetcher::list_remote_branch_info(&parsed.clone_url, proxy_url.as_deref())
+            .map_err(AppError::classify_git_error)
     })
     .await?
 }
@@ -1467,7 +1503,7 @@ pub fn update_git_skill_internal(
         ));
     }
 
-    let git_source = git_source_from_skill(&skill)?;
+    let git_source = resolve_git_source_for_skill(&skill, proxy_url)?;
     git_fetcher::validate_git_url(&git_source.clone_url).map_err(AppError::git)?;
     let remote_revision = git_fetcher::resolve_remote_revision(
         &git_source.clone_url,
@@ -1489,13 +1525,24 @@ pub fn update_git_skill_internal(
         .update_skill_update_status(skill_id, "updating")
         .map_err(AppError::db)?;
 
-    let temp_dir = git_fetcher::clone_repo_ref(
+    let temp_dir = match git_fetcher::clone_repo_ref(
         &git_source.clone_url,
         git_source.branch.as_deref(),
         cancel,
         proxy_url,
-    )
-    .map_err(AppError::classify_git_error)?;
+    ) {
+        Ok(dir) => dir,
+        Err(err) => {
+            let message = err.to_string();
+            let _ = store.update_skill_check_state(
+                skill_id,
+                skill.remote_revision.as_deref(),
+                "error",
+                Some(&message),
+            );
+            return Err(AppError::classify_git_error(err));
+        }
+    };
     let update_result = (|| -> Result<bool, AppError> {
         git_fetcher::checkout_revision(&temp_dir, &remote_revision).map_err(AppError::git)?;
         let skill_dir = resolve_skill_dir(
@@ -1754,7 +1801,7 @@ pub fn check_skill_update_internal(
 
     match skill.source_type.as_str() {
         "git" | "skillssh" => {
-            let git_source = git_source_from_skill(&skill)?;
+            let git_source = resolve_git_source_for_skill(&skill, proxy_url)?;
             let metadata_updated = skill.source_ref_resolved.as_deref()
                 != Some(git_source.clone_url.as_str())
                 || skill.source_subpath.as_deref() != git_source.subpath.as_deref()
@@ -1872,10 +1919,27 @@ fn should_skip_update_check(
 
 pub fn git_source_from_skill(skill: &SkillRecord) -> Result<GitSkillSource, AppError> {
     if let Some(resolved) = &skill.source_ref_resolved {
+        let mut branch = skill.source_branch.clone();
+        let mut subpath = skill.source_subpath.clone();
+        // Legacy installs may have clone URL + subpath but no branch — recover
+        // from the original source_ref when possible (sync parse, no network).
+        if (branch.is_none() || subpath.is_none()) && skill.source_type == "git" {
+            if let Some(source_ref) = &skill.source_ref {
+                let parsed = git_fetcher::parse_git_source(source_ref);
+                if git_fetcher::clone_urls_equivalent(&parsed.clone_url, resolved) {
+                    if branch.is_none() {
+                        branch = parsed.branch;
+                    }
+                    if subpath.is_none() {
+                        subpath = parsed.subpath;
+                    }
+                }
+            }
+        }
         return Ok(GitSkillSource {
             clone_url: resolved.clone(),
-            branch: skill.source_branch.clone(),
-            subpath: skill.source_subpath.clone(),
+            branch,
+            subpath,
             locator_skill_id: skill_ssh_id(skill),
         });
     }
@@ -1914,6 +1978,35 @@ pub fn git_source_from_skill(skill: &SkillRecord) -> Result<GitSkillSource, AppE
             "Skill does not support git-based updates",
         )),
     }
+}
+
+/// Resolve git source for update checks, backfilling branch/subpath from the
+/// original source URL when they were not persisted at install time.
+fn resolve_git_source_for_skill(
+    skill: &SkillRecord,
+    proxy_url: Option<&str>,
+) -> Result<GitSkillSource, AppError> {
+    let mut git_source = git_source_from_skill(skill)?;
+    if skill.source_type != "git" {
+        return Ok(git_source);
+    }
+    if git_source.branch.is_some() && git_source.subpath.is_some() {
+        return Ok(git_source);
+    }
+    let Some(source_ref) = skill.source_ref.as_deref() else {
+        return Ok(git_source);
+    };
+    let parsed = git_fetcher::parse_git_source_resolved(source_ref, proxy_url);
+    if !git_fetcher::clone_urls_equivalent(&parsed.clone_url, &git_source.clone_url) {
+        return Ok(git_source);
+    }
+    if git_source.branch.is_none() {
+        git_source.branch = parsed.branch;
+    }
+    if git_source.subpath.is_none() {
+        git_source.subpath = parsed.subpath;
+    }
+    Ok(git_source)
 }
 
 fn skill_ssh_id(skill: &SkillRecord) -> Option<String> {

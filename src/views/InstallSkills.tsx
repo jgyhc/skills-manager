@@ -28,7 +28,7 @@ import { toast } from "sonner";
 import { cn } from "../utils";
 import { useApp } from "../context/AppContext";
 import * as api from "../lib/tauri";
-import type { ScanResult, SkillsShSkill, BatchImportResult, GitPreviewResult } from "../lib/tauri";
+import type { ScanResult, SkillsShSkill, BatchImportResult, GitPreviewResult, RemoteBranchInfo } from "../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useSearchParams, useNavigate } from "react-router-dom";
@@ -60,6 +60,11 @@ export function InstallSkills() {
   const [marketReloadKey, setMarketReloadKey] = useState(0);
   const [installing, setInstalling] = useState<string | null>(null);
   const [gitUrl, setGitUrl] = useState("");
+  const [gitBranch, setGitBranch] = useState("");
+  const [gitBranches, setGitBranches] = useState<string[]>([]);
+  const [gitDefaultBranch, setGitDefaultBranch] = useState<string | null>(null);
+  const [gitBranchesLoading, setGitBranchesLoading] = useState(false);
+  const [gitBranchesError, setGitBranchesError] = useState<string | null>(null);
   const [gitLoading, setGitLoading] = useState(false);
   const [gitCancelKey, setGitCancelKey] = useState<string | null>(null);
   const [gitPreview, setGitPreview] = useState<GitPreviewResult | null>(null);
@@ -151,6 +156,66 @@ export function InstallSkills() {
       return ref === trimmed || ref.endsWith("/" + trimmed.split("/").slice(-2).join("/"));
     });
   }, [managedSkills]);
+
+  /** 从 GitHub tree URL 等格式中解析分支名，用于与远端分支列表对齐预选。 */
+  const parseBranchFromUrl = useCallback((url: string): string | null => {
+    const trimmed = url.trim();
+    const treeMatch = trimmed.match(
+      /github\.com\/[^/]+\/[^/]+?(?:\.git)?\/tree\/([^/?#]+)/
+    );
+    return treeMatch?.[1] ?? null;
+  }, []);
+
+  /** 根据 URL 解析结果与远端分支信息，计算初始选中分支。 */
+  const pickInitialBranch = useCallback(
+    (url: string, info: RemoteBranchInfo): string => {
+      const fromUrl = parseBranchFromUrl(url);
+      if (fromUrl && info.branches.includes(fromUrl)) return fromUrl;
+      if (info.default_branch && info.branches.includes(info.default_branch)) {
+        return info.default_branch;
+      }
+      return info.branches[0] ?? "";
+    },
+    [parseBranchFromUrl]
+  );
+
+  // 仓库地址变化时，防抖拉取远端分支列表供用户选择。
+  useEffect(() => {
+    const url = gitUrl.trim();
+    if (!url || activeTab !== "git") {
+      setGitBranches([]);
+      setGitDefaultBranch(null);
+      setGitBranch("");
+      setGitBranchesError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setGitBranchesLoading(true);
+      setGitBranchesError(null);
+      try {
+        const info = await api.listGitBranches(url);
+        if (cancelled) return;
+        setGitBranches(info.branches);
+        setGitDefaultBranch(info.default_branch);
+        setGitBranch(pickInitialBranch(url, info));
+      } catch (error: unknown) {
+        if (cancelled) return;
+        setGitBranches([]);
+        setGitDefaultBranch(null);
+        setGitBranch("");
+        setGitBranchesError(getErrorMessage(error, t("install.gitBranchLoadFailed")));
+      } finally {
+        if (!cancelled) setGitBranchesLoading(false);
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [gitUrl, activeTab, pickInitialBranch, t]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -485,7 +550,7 @@ export function InstallSkills() {
           }
         }
       );
-      const preview = await api.previewGitInstall(url);
+      const preview = await api.previewGitInstall(url, gitBranch || null);
       toast.dismiss(toastId);
       setGitPreview(preview);
       setGitPreviewRepoUrl(url);
@@ -529,11 +594,15 @@ export function InstallSkills() {
       await api.confirmGitInstall(
         repoUrl,
         gitPreview.temp_dir,
-        selected.map((s) => ({ rel_path: s.rel_path, name: s.name }))
+        selected.map((s) => ({ rel_path: s.rel_path, name: s.name })),
+        gitBranch || null
       );
       await Promise.all([refreshPresets(), refreshManagedSkills()]);
       toast.success(t("install.toast.success", { name: selected.map((s) => s.name).join(", ") }));
       setGitUrl("");
+      setGitBranch("");
+      setGitBranches([]);
+      setGitDefaultBranch(null);
       setGitPreview(null);
       setGitPreviewRepoUrl(null);
       setGitSelections([]);
@@ -1469,6 +1538,39 @@ export function InstallSkills() {
                   className="app-input w-full bg-background"
                 />
               </div>
+              {gitUrl.trim() ? (
+                <div>
+                  <label className="mb-1 block text-[13px] font-medium text-tertiary">
+                    {t("install.gitBranch")}
+                  </label>
+                  {gitBranchesLoading ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-[13px] text-muted">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t("install.gitBranchLoading")}
+                    </div>
+                  ) : gitBranchesError ? (
+                    <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[13px] text-amber-400">
+                      {gitBranchesError}
+                    </p>
+                  ) : gitBranches.length > 0 ? (
+                    <select
+                      value={gitBranch}
+                      onChange={(e) => setGitBranch(e.target.value)}
+                      disabled={gitLoading}
+                      className="app-input w-full bg-background"
+                    >
+                      {gitBranches.map((branch) => (
+                        <option key={branch} value={branch}>
+                          {branch}
+                          {branch === gitDefaultBranch
+                            ? ` (${t("install.gitDefaultBranch")})`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </div>
+              ) : null}
               {gitUrl.trim() && findInstalledByGitUrl(gitUrl) && (
                 <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[13px] text-amber-400">
                   <Check className="h-3.5 w-3.5 shrink-0" />

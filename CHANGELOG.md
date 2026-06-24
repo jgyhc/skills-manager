@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.1] - 2026-06-24
+
+### Release Overview
+- Git install and update reliability: pick a branch when cloning from a repository, and stop update checks from hanging on slow networks or SSH passphrase prompts.
+
+### User-facing
+- **Branch picker for Git installs** — After entering a repository URL, the install screen loads remote branches and lets you choose which branch to clone. GitHub tree URLs (e.g. `…/tree/main/…`) pre-select the matching branch when it exists; otherwise the repository default branch is selected.
+- **Update checks no longer freeze the app** — Remote Git queries (`ls-remote`, branch listing) now time out after 30 seconds with a clear error instead of spinning indefinitely. SSH uses non-interactive mode so a missing key or passphrase prompt cannot block the UI.
+- **More accurate Git skill update detection** — Skills installed before branch metadata was stored now backfill branch and subpath from the original source URL when checking for updates. New installs also persist the checked-out branch when the UI did not record one explicitly.
+
+### Developer & Governance
+- Added `list_git_branches` Tauri command and `RemoteBranchInfo` response type; extended `preview_git_install` / `confirm_git_install` with an optional `branch` parameter.
+- Replaced the libgit2 anonymous-remote fallback in `resolve_remote_revision` with system `git ls-remote` only; added `git_output_with_timeout`, `list_remote_branch_info`, `detect_clone_branch`, and `resolve_git_source_for_skill`.
+- Added `install.gitBranch*` i18n keys to English, Simplified Chinese, and Traditional Chinese.
+
 ## [1.25.0] - 2026-06-19
 
 ### Release Overview

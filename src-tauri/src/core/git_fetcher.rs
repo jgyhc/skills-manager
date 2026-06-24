@@ -2,7 +2,7 @@ use crate::core::central_repo;
 use crate::core::skill_metadata;
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use git2::{Direction, Repository};
+use git2::Repository;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CLONE_TIMEOUT_SECS: u64 = 300;
+/// Network git queries (`ls-remote`, etc.) must not block the UI indefinitely.
+const REMOTE_QUERY_TIMEOUT_SECS: u64 = 30;
 
 /// Filename prefix shared by isolated install checkouts under `std::env::temp_dir()`.
 /// Used by both `materialize_cached_repo` (writer) and `validate_clone_temp_path` (reader).
@@ -21,16 +23,58 @@ pub const CLONE_TEMP_PREFIX: &str = "skills-manager-clone-";
 /// Callback type for reporting clone progress messages to the UI.
 pub type ProgressCallback = Box<dyn Fn(&str) + Send>;
 
+/// SSH flags for non-interactive git operations — fail fast instead of waiting
+/// for a passphrase prompt that would freeze update checks in the GUI.
+const GIT_SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=2";
+
 /// Create a `Command` for git that hides the console window on Windows.
 fn git_command() -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new("git");
+    cmd.env("GIT_SSH_COMMAND", GIT_SSH_COMMAND);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+/// Run a git subprocess with a wall-clock timeout. Used for `ls-remote` and
+/// other quick network probes so update checks cannot spin forever.
+fn git_output_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "Failed to spawn git command".to_string())?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .with_context(|| "Failed to read git command output".to_string());
+            }
+            Ok(None) => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "Git command timed out after {}s — check your network connection",
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).with_context(|| "Failed to wait on git command".to_string());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,14 +134,8 @@ pub fn validate_git_url(url: &str) -> Result<()> {
 }
 
 /// Strip clone-irrelevant differences from a URL so equivalent forms share a
-/// cache slot and pass remote-equality checks. Specifically:
-/// - Trims whitespace and a trailing `/`.
-/// - Drops a trailing `.git` suffix (servers accept both forms).
-///
-/// This is intentionally conservative — no case folding, no scheme rewriting,
-/// no path normalization beyond the suffix — so non-GitHub hosts that treat
-/// paths case-sensitively or distinguish schemes are unaffected.
-fn canonicalize_clone_url(url: &str) -> String {
+/// cache slot and pass remote-equality checks.
+pub fn canonicalize_clone_url(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
     trimmed
         .strip_suffix(".git")
@@ -587,6 +625,31 @@ pub fn clone_repo_ref_with_progress(
     }
 }
 
+pub fn clone_urls_equivalent(a: &str, b: &str) -> bool {
+    canonicalize_clone_url(a) == canonicalize_clone_url(b)
+}
+
+/// Best-effort read of the branch checked out in a local clone (after
+/// `git clone --branch …`). Used to persist branch metadata when the install
+/// UI did not record an explicit branch name.
+pub fn detect_clone_branch(repo_dir: &Path) -> Option<String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 pub fn get_head_revision(repo_dir: &Path) -> Result<String> {
     let output = git_command()
         .arg("-C")
@@ -610,31 +673,9 @@ pub fn resolve_remote_revision(
     branch: Option<&str>,
     proxy_url: Option<&str>,
 ) -> Result<String> {
-    if let Ok(revision) = resolve_remote_revision_with_git(url, branch, proxy_url) {
-        return Ok(revision);
-    }
-
-    let repo = Repository::init_bare(
-        std::env::temp_dir().join(format!("skills-manager-remote-{}", uuid::Uuid::new_v4())),
-    )?;
-    let mut remote = repo.remote_anonymous(url)?;
-    let mut proxy_opts = git2::ProxyOptions::new();
-    if let Some(proxy) = proxy_url.filter(|s| !s.is_empty()) {
-        proxy_opts.url(proxy);
-    }
-    remote.connect_auth(Direction::Fetch, None, Some(proxy_opts))?;
-    let refs = remote.list()?;
-
-    if let Some(branch) = branch {
-        let target = format!("refs/heads/{branch}");
-        if let Some(head) = refs.iter().find(|head| head.name() == target) {
-            return Ok(head.oid().to_string());
-        }
-    } else if let Some(head) = refs.iter().find(|head| head.name() == "HEAD") {
-        return Ok(head.oid().to_string());
-    }
-
-    anyhow::bail!("Unable to resolve remote revision for {}", url)
+    // System `git ls-remote` only — the libgit2 anonymous-remote fallback could
+    // block indefinitely on SSH passphrase prompts and froze update checks.
+    resolve_remote_revision_with_git(url, branch, proxy_url)
 }
 
 pub fn checkout_revision(repo_dir: &Path, revision: &str) -> Result<()> {
@@ -868,16 +909,68 @@ pub fn parse_git_source_resolved(url: &str, proxy_url: Option<&str>) -> ParsedGi
     parsed
 }
 
+/// Remote branch listing result for the install UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RemoteBranchInfo {
+    pub branches: Vec<String>,
+    pub default_branch: Option<String>,
+}
+
+/// List remote branches and resolve the repository default branch (via `HEAD` symref).
+pub fn list_remote_branch_info(url: &str, proxy_url: Option<&str>) -> Result<RemoteBranchInfo> {
+    let branches = list_remote_branches(url, proxy_url)?;
+    let default_branch = resolve_remote_default_branch(url, proxy_url).ok();
+    Ok(RemoteBranchInfo {
+        branches,
+        default_branch,
+    })
+}
+
+fn resolve_remote_default_branch(url: &str, proxy_url: Option<&str>) -> Result<String> {
+    let mut cmd = git_command();
+    if let Some(proxy) = proxy_url.filter(|s| !s.is_empty()) {
+        cmd.arg("-c").arg(format!("http.proxy={proxy}"));
+        cmd.arg("-c").arg(format!("https.proxy={proxy}"));
+    }
+    let output = {
+        cmd.args(["ls-remote", "--symref", url, "HEAD"]);
+        git_output_with_timeout(
+            cmd,
+            Duration::from_secs(REMOTE_QUERY_TIMEOUT_SECS),
+        )
+    }
+    .with_context(|| format!("Failed to resolve default branch for {}", url))?;
+
+    if !output.status.success() {
+        anyhow::bail!("git ls-remote --symref exited with {}", output.status);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let refname = parts.next().unwrap_or("");
+        if let Some(branch) = refname.strip_prefix("ref: refs/heads/") {
+            return Ok(branch.to_string());
+        }
+    }
+
+    anyhow::bail!("No default branch symref found for {}", url)
+}
+
 fn list_remote_branches(url: &str, proxy_url: Option<&str>) -> Result<Vec<String>> {
     let mut cmd = git_command();
     if let Some(proxy) = proxy_url.filter(|s| !s.is_empty()) {
         cmd.arg("-c").arg(format!("http.proxy={proxy}"));
         cmd.arg("-c").arg(format!("https.proxy={proxy}"));
     }
-    let output = cmd
-        .args(["ls-remote", "--heads", url])
-        .output()
-        .with_context(|| format!("Failed to list remote branches for {}", url))?;
+    let output = {
+        cmd.args(["ls-remote", "--heads", url]);
+        git_output_with_timeout(
+            cmd,
+            Duration::from_secs(REMOTE_QUERY_TIMEOUT_SECS),
+        )
+    }
+    .with_context(|| format!("Failed to list remote branches for {}", url))?;
 
     if !output.status.success() {
         anyhow::bail!("git ls-remote --heads exited with {}", output.status);
@@ -911,10 +1004,14 @@ fn resolve_remote_revision_with_git(
         cmd.arg("-c").arg(format!("http.proxy={proxy}"));
         cmd.arg("-c").arg(format!("https.proxy={proxy}"));
     }
-    let output = cmd
-        .args(["ls-remote", url, &target])
-        .output()
-        .with_context(|| format!("Failed to query remote {}", url))?;
+    let output = {
+        cmd.args(["ls-remote", url, &target]);
+        git_output_with_timeout(
+            cmd,
+            Duration::from_secs(REMOTE_QUERY_TIMEOUT_SECS),
+        )
+    }
+    .with_context(|| format!("Failed to query remote {}", url))?;
 
     if !output.status.success() {
         anyhow::bail!("git ls-remote exited with {}", output.status);

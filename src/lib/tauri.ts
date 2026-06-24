@@ -280,16 +280,37 @@ export interface GitPreviewResult {
   skills: GitSkillPreview[];
 }
 
+export interface RemoteBranchInfo {
+  branches: string[];
+  default_branch: string | null;
+}
+
 export interface SkillInstallItem {
   rel_path: string;
   name: string;
 }
 
-export const previewGitInstall = (repoUrl: string) =>
-  invoke<GitPreviewResult>("preview_git_install", { repoUrl });
+export const listGitBranches = (repoUrl: string) =>
+  invoke<RemoteBranchInfo>("list_git_branches", { repoUrl });
 
-export const confirmGitInstall = (repoUrl: string, tempDir: string, items: SkillInstallItem[]) =>
-  invoke<void>("confirm_git_install", { repoUrl, tempDir, items });
+export const previewGitInstall = (repoUrl: string, branch?: string | null) =>
+  invoke<GitPreviewResult>("preview_git_install", {
+    repoUrl,
+    branch: branch?.trim() || null,
+  });
+
+export const confirmGitInstall = (
+  repoUrl: string,
+  tempDir: string,
+  items: SkillInstallItem[],
+  branch?: string | null
+) =>
+  invoke<void>("confirm_git_install", {
+    repoUrl,
+    branch: branch?.trim() || null,
+    tempDir,
+    items,
+  });
 
 export const cancelGitPreview = (tempDir: string) =>
   invoke<void>("cancel_git_preview", { tempDir });
