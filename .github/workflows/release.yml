@@ -186,7 +186,11 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
           if [ "${{ needs.prepare.outputs.has_password }}" = "true" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_PASSWORD" >> "$GITHUB_ENV"
+            {
+              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<EOF"
+              echo "$SIGNING_PASSWORD"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Build with Tauri
